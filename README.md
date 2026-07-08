@@ -1,6 +1,6 @@
 # QA Quest
 
-[![CI](https://github.com/jsways/qa-quest/actions/workflows/ci.yml/badge.svg)](https://github.com/jsways/qa-quest/actions/workflows/ci.yml)
+[![CI](https://github.com/nonplace/qa-quest/actions/workflows/ci.yml/badge.svg)](https://github.com/nonplace/qa-quest/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **QA Quest turns pre-release QA into a gamified co-op session between you and your coding agent.** You play your web app in your own real Chrome (real fingerprint, real session, so bot protection just works). Your agent co-pilots: it generates a quest from your release content, tracks objectives in an in-page HUD, captures full context for every bug in one keystroke, dispatches fix work in the background, and compiles the validated session into deterministic regression tests.
@@ -32,14 +32,14 @@ The QA loop never merges anything. Fixes go through your project's normal review
 ### Option 1: Claude Code plugin
 
 ```
-/plugin marketplace add jsways/qa-quest
+/plugin marketplace add nonplace/qa-quest
 /plugin install qa-quest@qa-quest
 ```
 
 ### Option 2: Manual
 
 ```bash
-git clone https://github.com/jsways/qa-quest.git
+git clone https://github.com/nonplace/qa-quest.git
 cp -r qa-quest/skills/qa-quest ~/.claude/skills/        # or <your-project>/.claude/skills/
 ```
 

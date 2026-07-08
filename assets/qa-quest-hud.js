@@ -1,5 +1,5 @@
 /*!
- * qa-quest-hud v0.1.0
+ * qa-quest-hud v0.2.0
  * QA Quest in-page layer: agent bridge (window.__qaQuest), gamified HUD,
  * console ring buffer, and WebMCP tool registration. One file, plain JS,
  * zero dependencies, no build step. Inject into any page or vendor it

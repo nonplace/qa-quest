@@ -1,12 +1,12 @@
 {
   "name": "qa-quest",
   "description": "Gamified co-op QA sessions between you and your coding agent: play your app in your real Chrome while the agent runs the quest HUD, captures bugs, dispatches fixes, and compiles regression tests.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Janusch Häring"
   },
-  "homepage": "https://github.com/jsways/qa-quest",
-  "repository": "https://github.com/jsways/qa-quest",
+  "homepage": "https://github.com/nonplace/qa-quest",
+  "repository": "https://github.com/nonplace/qa-quest",
   "license": "MIT",
   "keywords": [
     "qa",

@@ -7,7 +7,7 @@ Thanks for wanting to help. This project is deliberately small and dependency-fr
 There is none. Clone the repo; you need Node 22+ and nothing else. No `npm install`, no build step.
 
 ```bash
-git clone https://github.com/jsways/qa-quest.git
+git clone https://github.com/nonplace/qa-quest.git
 cd qa-quest
 ```
 
