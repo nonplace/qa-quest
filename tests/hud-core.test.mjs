@@ -53,7 +53,7 @@ function makeSession(storage = makeStorage(), extra = {}) {
 
 describe("module surface", () => {
   test("exports the core API and version", () => {
-    assert.equal(core.VERSION, "0.1.0");
+    assert.equal(core.VERSION, "0.2.0");
     assert.deepEqual(core.BOUNTY, { P1: 300, P2: 150, P3: 50 });
     assert.deepEqual(core.KEYS, {
       quest: "qaquest:quest",
@@ -272,7 +272,7 @@ describe("session: loadQuest / getQuest / getState", () => {
     session.loadQuest(validQuest());
     const state = session.getState();
     assert.equal(state.route, "/checkout?step=2");
-    assert.equal(state.version, "0.1.0");
+    assert.equal(state.version, "0.2.0");
     assert.equal(state.bugCount, 0);
     assert.equal(state.pendingEvents, 0);
     assert.equal(Number.isNaN(Date.parse(state.injectedAt)), false, "injectedAt is a parseable ISO date");

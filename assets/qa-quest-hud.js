@@ -9,7 +9,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "0.1.0";
+  var VERSION = "0.2.0";
 
   // -------------------------------------------------------------------------
   // core: pure logic, no DOM. Exposed via module.exports for Node tests and
