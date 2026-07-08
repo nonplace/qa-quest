@@ -76,6 +76,11 @@ anything smelling of design intent, cross-cutting refactors, or bugs you
 could not localise. When in doubt, file the card and move on; the
 session's job is finding bugs, not fixing all of them live.
 
+If your agent surface has no background subagent facility (or no access
+to the code), skip dispatch entirely: keep every card at `logged`,
+continue polling, and hand the cards over at wrap. The session loses
+nothing but live fixes.
+
 Dispatch in the **background** so the polling loop never stalls. Adapt
 the prompt below to the host project (its branch naming, test commands,
 and PR conventions), and always pass the full bug card, never a

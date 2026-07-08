@@ -7,15 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *Origins: QA Quest was extracted on 2026-07-08/09 from a production implementation developed privately. The public history intentionally starts at 0.1.0; earlier iterations lived in a private codebase and are not replayed here.*
 
+## [0.3.0] - 2026-07-09
+
+### Added
+
+- README: "Your first quest in 5 minutes" walkthrough for first-time and non-technical users, with what-you-will-see notes at every step.
+- README: DevTools one-liner to verify whether WebMCP is active, and what it means when it is not.
+- README: "Works with other agents" section documenting the agent-agnostic surface (plain-JS bridge, markdown skill) and its honest test status.
+- Architecture: two new design rationale entries ("Why a skill and not hooks?", "Why is this agent-agnostic?").
+
+### Changed
+
+- Documentation tightened across the repo; redundant restatements removed.
+- Code comments in `assets/qa-quest-hud.js` reduced to why-only; behaviour unchanged.
+
 ## [0.2.0] - 2026-07-09
 
 ### Changed
 
 - Project home moved to [github.com/nonplace/qa-quest](https://github.com/nonplace/qa-quest). All links, badges, and install commands updated accordingly (`/plugin marketplace add nonplace/qa-quest`).
-
-### Fixed
-
-- None.
 
 ## [0.1.0] - 2026-07-09
 
@@ -29,5 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude Code plugin packaging (`.claude-plugin/plugin.json` + `marketplace.json`) so the repo installs via `/plugin marketplace add nonplace/qa-quest`.
 - CI workflow (Node 22: syntax check + node --test), MIT license, contributing guide, and architecture documentation.
 
+[0.3.0]: https://github.com/nonplace/qa-quest/releases/tag/v0.3.0
 [0.2.0]: https://github.com/nonplace/qa-quest/releases/tag/v0.2.0
 [0.1.0]: https://github.com/nonplace/qa-quest/releases/tag/v0.1.0

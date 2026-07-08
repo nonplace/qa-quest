@@ -1,5 +1,5 @@
 /*!
- * qa-quest-hud v0.2.0
+ * qa-quest-hud v0.3.0
  * QA Quest in-page layer: agent bridge (window.__qaQuest), gamified HUD,
  * console ring buffer, and WebMCP tool registration. One file, plain JS,
  * zero dependencies, no build step. Inject into any page or vendor it
@@ -9,7 +9,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "0.2.0";
+  var VERSION = "0.3.0";
 
   // -------------------------------------------------------------------------
   // core: pure logic, no DOM. Exposed via module.exports for Node tests and
@@ -32,7 +32,6 @@
     return typeof v === "string" && v.trim().length > 0;
   }
 
-  // Lenient id/title reader: non-empty string or finite number, else null.
   function coerceLabel(v) {
     if (isNonEmptyString(v)) return v;
     if (typeof v === "number" && isFinite(v)) return String(v);
@@ -138,8 +137,6 @@
     };
   }
 
-  // Console ring buffer semantics: newest last, capped entry count and
-  // capped characters per entry.
   function createRing(maxEntries, maxChars) {
     var capEntries = typeof maxEntries === "number" && maxEntries > 0 ? maxEntries : RING_MAX_ENTRIES;
     var capChars = typeof maxChars === "number" && maxChars > 0 ? maxChars : RING_MAX_CHARS;
@@ -495,8 +492,8 @@
   var controller = new AbortController();
   var signal = controller.signal;
 
-  // ---- console ring buffer (non-destructive wrap) ----
-
+  // Console capture wraps error/warn non-destructively; the page's own
+  // logging keeps working and destroy() restores the originals.
   var ring = createRing(RING_MAX_ENTRIES, RING_MAX_CHARS);
   var originalConsoleError = console.error;
   var originalConsoleWarn = console.warn;
@@ -547,8 +544,6 @@
     { signal: signal }
   );
 
-  // ---- session ----
-
   var session = createSession({
     storage: window.sessionStorage,
     getRoute: function () {
@@ -565,8 +560,6 @@
       return ring.snapshot();
     }
   });
-
-  // ---- styles ----
 
   var STYLE_ID = "qq-style";
   var Z = 2147483000;
@@ -622,8 +615,8 @@
     ".qq-hidden{display:none !important;}";
   document.head.appendChild(styleEl);
 
-  // ---- DOM (all createElement + textContent; quest titles and notes are
-  // untrusted and must never reach innerHTML) ----
+  // All DOM is createElement + textContent; quest titles and notes are
+  // untrusted and must never reach innerHTML.
 
   function el(tag, className, text) {
     var node = document.createElement(tag);
@@ -715,8 +708,6 @@
     });
   }
 
-  // ---- toasts ----
-
   function toast(message, status) {
     var t = el("div", "qq-toast", message);
     if (status && /^[a-z_]+$/.test(status)) t.classList.add("qq-toast-" + status);
@@ -729,8 +720,6 @@
       }, 320);
     }, 6000);
   }
-
-  // ---- render ----
 
   function render() {
     var state = session.getState();
@@ -803,8 +792,6 @@
     });
   }
 
-  // ---- panel / popover state ----
-
   var expanded = false;
 
   function setExpanded(next) {
@@ -876,8 +863,6 @@
     },
     { signal: signal }
   );
-
-  // ---- public bridge (contract surface) ----
 
   function objectivePointsById(id) {
     var quest = session.getQuest();
@@ -981,8 +966,7 @@
 
   window.__qaQuest = bridge;
 
-  // ---- WebMCP registration (feature-detected, silent no-op when absent) ----
-
+  // WebMCP registration: feature-detected, silent no-op when the API is absent.
   (function registerWebMcp() {
     var mc = null;
     try {

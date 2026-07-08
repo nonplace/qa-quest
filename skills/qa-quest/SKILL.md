@@ -57,10 +57,12 @@ it consistently. Re-probe only after a reload or if calls start failing.
    flows may fail in an automated browser profile.
 3. **Probe for the bridge.** Evaluate
    `typeof window.__qaQuest !== "undefined"` in the target tab.
-4. **Inject the HUD if absent.** Read `assets/qa-quest-hud.js` from this
-   skill's own plugin/repo directory (sibling of `skills/`; resolve the
-   path relative to this SKILL.md) and evaluate the whole file in the
-   tab. Injection is idempotent: re-injecting after a reload is a no-op
+4. **Inject the HUD if absent.** Read the HUD file and evaluate the
+   whole file in the tab. Resolve its path relative to this SKILL.md,
+   trying in order: `../../assets/qa-quest-hud.js` (the plugin/repo
+   layout, where `assets/` is a sibling of `skills/`), then
+   `qa-quest-hud.js` next to this SKILL.md (manually copied installs).
+   Injection is idempotent: re-injecting after a reload is a no-op
    refresh, state lives in sessionStorage. Verify with
    `window.__qaQuest.getState().version`.
 5. **Probe WebMCP.** Run the probe from `references/webmcp-shim.md`.
@@ -106,8 +108,8 @@ Handle each event by type:
 - **note**: log it. Ack only if it asks a question.
 
 **Reload recovery:** if a poll fails, re-probe the bridge. On a hard
-reload the HUD is gone; re-inject `assets/qa-quest-hud.js` (idempotent)
-and continue. Quest state and pending events survive reloads in
+reload the HUD is gone; re-inject the HUD file (same path resolution as
+Phase 0 step 4, idempotent) and continue. Quest state and pending events survive reloads in
 sessionStorage. A CLOSED tab is different: sessionStorage is per-tab, so
 undrained events in a closed tab are gone. Tell the operator exactly what
 was lost and re-load the quest in the new tab.

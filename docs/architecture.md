@@ -29,13 +29,7 @@ The agent-side session driver, written procedurally in three phases so mid-tier 
 - **Phase 1, Play:** poll `drainEvents()` every ~15 seconds. Handle each event by type: bugs get a fast acknowledgement, full context capture (screenshot, console, network), a structured bug card, and optionally a background fix subagent on an isolated branch; help requests get state seeded through the app's own APIs; objective completions and notes get logged. Re-inject after hard reloads if the probe fails.
 - **Phase 2, Wrap:** final stats toast and terminal summary; remaining bugs filed in the team's tracker; the quest-to-test compiler runs on passed objectives; the team's release step is offered but never run unprompted.
 
-Hard rules baked into the skill:
-
-- The QA loop **never merges anything**. Fix branches and PRs go through the project's normal review gates.
-- Between events the agent stays quiet; the HUD is the feedback surface.
-- The agent never drives clicks in the operator's tab during play. It observes and evaluates. The operator owns the mouse.
-- Foreign WebMCP tools (pages the operator doesn't own) are untrusted: read description and input schema before calling, and never call state-mutating foreign tools without explicit operator say-so.
-- No secrets, tokens, or cookies ever appear in bug cards or quest files.
+Five hard rules are baked into the skill (full statements in `skills/qa-quest/SKILL.md`): never merge, stay quiet between events, never drive the operator's tab, treat foreign WebMCP tools as untrusted, and no secrets in bug cards or quest files.
 
 ### 3. WebMCP shim
 
@@ -115,3 +109,5 @@ Registered when the model-context API is present; each tool delegates 1:1 to the
 - **Why polling instead of a socket?** The agent's browser tools speak JS evaluation; a ~15 second `drainEvents()` poll is simple, reliable across every tool surface, and fast enough for the acknowledgement budget.
 - **Why WebMCP AND a direct bridge?** WebMCP is the right long-term surface (typed tools, standard discovery) but is an origin-trial feature today. The direct `window.__qaQuest` path makes the whole system work on any browser tool that can evaluate JS, with the shim upgrading transparently where WebMCP exists.
 - **Why does the agent never click during play?** Two reasons. Trust: the operator must know the state they see is the state they produced. Signal: the whole value of manual QA is human judgment on real interaction; an agent driving the mouse turns it back into the automation that already exists.
+- **Why a skill and not hooks?** Hooks are deterministic interceptors that fire on agent tool events, not timers, so they cannot drive the ~15 second poll loop. And hook configuration applies session-wide, so enforcement like blocking merges would be blunt: it would block every merge in the session, not just the QA loop's. Deterministic behaviour lives where determinism is cheap, in the injected bridge (a tested state machine); the skill is the judgment layer on top. The hard rules are stated as rules precisely because the enforcement point that could make them mechanical does not exist at the right granularity yet.
+- **Why is this agent-agnostic?** The contract is a JS object in a page, not an agent API. Any agent whose browser tool can evaluate JavaScript in the tab can drive a full session over `window.__qaQuest`, and the skill is plain markdown any capable model can follow as instructions; only the plugin packaging (`.claude-plugin/`) is Claude Code specific. Tested with Claude Code; other agents are supported paths, not certified ones.
