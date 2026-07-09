@@ -1,5 +1,5 @@
 /*!
- * qa-quest-hud v0.3.0
+ * qa-quest-hud v0.4.0
  * QA Quest in-page layer: agent bridge (window.__qaQuest), gamified HUD,
  * console ring buffer, and WebMCP tool registration. One file, plain JS,
  * zero dependencies, no build step. Inject into any page or vendor it
@@ -9,7 +9,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "0.3.0";
+  var VERSION = "0.4.0";
 
   // -------------------------------------------------------------------------
   // core: pure logic, no DOM. Exposed via module.exports for Node tests and
@@ -19,6 +19,15 @@
   var KEYS = {
     quest: "qaquest:quest",
     events: "qaquest:events",
+    // Append-only durable log. Every event lands here the instant it is
+    // created and NOTHING (not drainEvents, not ackEvents) ever removes an
+    // entry — only the bounded-cap trim in pushEvent drops the oldest. This
+    // is the at-least-once backstop: "reported" == "secured", independent of
+    // whether the agent's poll/drain ever succeeds. See docs/ROADMAP.md 1.1.
+    archive: "qaquest:archive",
+    // Monotonic sequence counter. Every event carries a stable `seq` so the
+    // agent can request "everything since seq N" without re-scanning.
+    seq: "qaquest:seq",
     bugCount: "qaquest:bugCount",
     bugPoints: "qaquest:bugPoints"
   };
@@ -27,6 +36,10 @@
   var RING_MAX_ENTRIES = 20;
   var RING_MAX_CHARS = 500;
   var DEFAULT_OBJECTIVE_POINTS = 100;
+  // Upper bound on the durable archive so a very long session cannot grow
+  // sessionStorage without limit. QA sessions produce tens of events; 2000 is
+  // far above any real run, and the oldest entries drop first if ever reached.
+  var ARCHIVE_MAX = 2000;
 
   function isNonEmptyString(v) {
     return typeof v === "string" && v.trim().length > 0;
@@ -280,14 +293,37 @@
       return v;
     }
 
+    function readArchive() {
+      var archive = readJSON(storage, KEYS.archive, []);
+      if (!Array.isArray(archive)) {
+        try {
+          storage.removeItem(KEYS.archive);
+        } catch (e) {
+          /* ignore */
+        }
+        return [];
+      }
+      return archive;
+    }
+
     function pushEvent(type, payload) {
       var event = {
         id: makeId(),
+        seq: readCount(KEYS.seq) + 1,
         type: type,
         ts: now(),
         route: getRoute(),
         payload: payload || {}
       };
+      writeJSON(storage, KEYS.seq, event.seq);
+      // Durable archive FIRST: if anything below fails, the event is already
+      // secured. The archive is append-only and bounded (oldest trimmed).
+      var archive = readArchive();
+      archive.push(event);
+      if (archive.length > ARCHIVE_MAX) archive = archive.slice(archive.length - ARCHIVE_MAX);
+      writeJSON(storage, KEYS.archive, archive);
+      // Pending queue: the poll surface the agent drains/acks. Losing this
+      // (truncated drain, closed tab) can no longer lose data — the archive holds it.
       var events = readEvents();
       events.push(event);
       writeJSON(storage, KEYS.events, events);
@@ -308,11 +344,20 @@
 
       getState: function () {
         var quest = readQuest();
+        var archive = readArchive();
+        var archivedBugs = 0;
+        for (var i = 0; i < archive.length; i++) if (archive[i].type === "bug") archivedBugs++;
         return {
           route: getRoute(),
           quest: quest,
           progress: computeProgress(quest, readCount(KEYS.bugPoints)),
           pendingEvents: readEvents().length,
+          // Durability signal: total events secured in the append-only archive,
+          // and secured bug count. `securedBugs` must always equal `bugCount`;
+          // any divergence is a data-loss bug the HUD surfaces loudly.
+          securedEvents: archive.length,
+          securedBugs: archivedBugs,
+          lastSeq: readCount(KEYS.seq),
           bugCount: readCount(KEYS.bugCount),
           injectedAt: injectedAt,
           version: VERSION
@@ -369,10 +414,73 @@
         return pushEvent("help", { text: typeof text === "string" ? text : String(text) });
       },
 
+      // Destructive read of the pending queue (back-compat). Durability now
+      // comes from the archive, so a truncated/dropped drain can no longer
+      // lose data — recover with getArchive()/exportSession(). Prefer the
+      // peekEvents()+ackEvents() cursor for true at-least-once delivery.
       drainEvents: function () {
         var events = readEvents();
         writeJSON(storage, KEYS.events, []);
         return events;
+      },
+
+      // Non-destructive read of the pending queue. Nothing is removed; pair
+      // with ackEvents() once the agent has durably persisted them.
+      peekEvents: function () {
+        return readEvents();
+      },
+
+      // Cursor removal: drop only the events whose id is in `ids` from the
+      // pending queue. The archive is untouched. This is the at-least-once
+      // path — an event is removed from pending ONLY after the agent confirms
+      // receipt, so a crash between peek and ack simply re-delivers.
+      ackEvents: function (ids) {
+        var wanted = {};
+        if (Array.isArray(ids)) {
+          for (var i = 0; i < ids.length; i++) wanted[String(ids[i])] = true;
+        }
+        var events = readEvents();
+        var remaining = [];
+        var removed = 0;
+        for (var j = 0; j < events.length; j++) {
+          if (events[j] && wanted[String(events[j].id)]) removed++;
+          else remaining.push(events[j]);
+        }
+        writeJSON(storage, KEYS.events, remaining);
+        return { ok: true, removed: removed, remaining: remaining.length };
+      },
+
+      // The durable, append-only record of every event this session captured.
+      // Optional `opts.sinceSeq` returns only events with seq strictly greater,
+      // so an agent can page forward without re-scanning. Never mutates state.
+      getArchive: function (opts) {
+        var archive = readArchive();
+        var sinceSeq = opts && typeof opts.sinceSeq === "number" ? opts.sinceSeq : null;
+        if (sinceSeq === null) return archive;
+        var out = [];
+        for (var i = 0; i < archive.length; i++) {
+          if (typeof archive[i].seq === "number" && archive[i].seq > sinceSeq) out.push(archive[i]);
+        }
+        return out;
+      },
+
+      // A single self-contained dump of the whole session: quest, progress,
+      // counters, and the full durable archive. This is the recovery + handoff
+      // artifact — save it to disk and no session-end loss is possible.
+      exportSession: function () {
+        var quest = readQuest();
+        return {
+          version: VERSION,
+          injectedAt: injectedAt,
+          exportedAt: now(),
+          route: getRoute(),
+          quest: quest,
+          progress: computeProgress(quest, readCount(KEYS.bugPoints)),
+          bugCount: readCount(KEYS.bugCount),
+          bugPoints: readCount(KEYS.bugPoints),
+          lastSeq: readCount(KEYS.seq),
+          archive: readArchive()
+        };
       },
 
       ack: function (a) {
@@ -461,7 +569,11 @@
     noQuest: "No quest loaded yet. The agent will send one shortly.",
     scoreLabel: "Score",
     bugsLabel: "Bugs",
+    securedLabel: "Secured",
     objectivesLabel: "Objectives",
+    exportTitle: "Export session (JSON)",
+    toastExported: "Session exported: {count} events secured",
+    toastExportCopied: "Session JSON copied to clipboard",
     reportBugButton: "Report bug (Ctrl+B)",
     popoverTitle: "Report a bug",
     severityLabel: "Severity",
@@ -580,6 +692,8 @@
     ".qq-bar{height:100%;width:0;background:linear-gradient(90deg,#f5a623,#fbc02d);border-radius:999px;transition:width 0.35s ease;}" +
     ".qq-stats{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#9aa1af;font-size:12px;}" +
     ".qq-stats b{color:#f5a623;font-weight:700;}" +
+    ".qq-stats .qq-loss{color:#f87171;font-weight:700;}" +
+    ".qq-stats .qq-loss b{color:#f87171;}" +
     ".qq-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;max-height:260px;overflow-y:auto;overflow-x:hidden;}" +
     ".qq-empty{color:#8b93a3;padding:6px 2px;}" +
     ".qq-row{display:flex;align-items:flex-start;gap:8px;width:100%;padding:5px 8px;border-radius:8px;background:none;border:none;color:inherit;font:inherit;text-align:left;}" +
@@ -637,9 +751,13 @@
   var panel = el("div", "qq-card qq-panel qq-hidden");
   var head = el("div", "qq-head");
   var titleEl = el("span", "qq-title", STRINGS.hudTitleFallback);
+  var exportBtn = button("qq-x", "⤓");
+  exportBtn.setAttribute("aria-label", STRINGS.exportTitle);
+  exportBtn.title = STRINGS.exportTitle;
   var closeBtn = button("qq-x", "▾");
   closeBtn.setAttribute("aria-label", STRINGS.collapse);
   head.appendChild(titleEl);
+  head.appendChild(exportBtn);
   head.appendChild(closeBtn);
   var progressTrack = el("div", "qq-progress");
   var progressBar = el("div", "qq-bar");
@@ -648,9 +766,11 @@
   var scoreEl = el("span");
   var objectivesEl = el("span");
   var bugsEl = el("span");
+  var securedEl = el("span");
   stats.appendChild(scoreEl);
   stats.appendChild(objectivesEl);
   stats.appendChild(bugsEl);
+  stats.appendChild(securedEl);
   var list = el("ul", "qq-list");
   var reportBtn = button("qq-report", STRINGS.reportBugButton);
   panel.appendChild(head);
@@ -735,6 +855,15 @@
     objectivesEl.textContent = STRINGS.objectivesLabel + " " + p.done + "/" + p.total;
     bugsEl.textContent = STRINGS.bugsLabel + " " + state.bugCount;
 
+    // Durability signal. securedBugs must equal bugCount; if they ever diverge
+    // (the run-1055 silent data-loss class), say so loudly instead of hiding it.
+    var secured = typeof state.securedBugs === "number" ? state.securedBugs : 0;
+    var lost = state.bugCount - secured;
+    securedEl.textContent = "";
+    securedEl.classList.toggle("qq-loss", lost > 0);
+    securedEl.appendChild(document.createTextNode((lost > 0 ? "⚠ " : "🛡 ") + STRINGS.securedLabel + " "));
+    securedEl.appendChild(el("b", null, lost > 0 ? secured + "/" + state.bugCount : String(secured)));
+
     list.textContent = "";
     if (!state.quest) {
       list.appendChild(el("li", "qq-empty", STRINGS.noQuest));
@@ -817,6 +946,40 @@
     closePopover();
   }
 
+  // Download the whole session (quest + durable archive) as a JSON file so a
+  // QA pro / dev has a portable artifact independent of any agent. Falls back
+  // to clipboard when a programmatic download is blocked.
+  function exportSessionToFile() {
+    var dump = session.exportSession();
+    var json = JSON.stringify(dump, null, 2);
+    var name =
+      "qa-quest-" + ((dump.quest && dump.quest.id) || "session") + "-" + Date.now() + ".json";
+    var count = Array.isArray(dump.archive) ? dump.archive.length : 0;
+    try {
+      var blob = new Blob([json], { type: "application/json" });
+      var url = URL.createObjectURL(blob);
+      var a = el("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () {
+        URL.revokeObjectURL(url);
+      }, 0);
+      toast(format(STRINGS.toastExported, { count: count }));
+    } catch (e) {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(json);
+          toast(STRINGS.toastExportCopied);
+        }
+      } catch (e2) {
+        /* nothing more we can do; the agent can still call exportSession() */
+      }
+    }
+  }
+
   pill.addEventListener(
     "click",
     function () {
@@ -831,6 +994,7 @@
     },
     { signal: signal }
   );
+  exportBtn.addEventListener("click", exportSessionToFile, { signal: signal });
   reportBtn.addEventListener("click", openPopover, { signal: signal });
   cancelBtn.addEventListener("click", closePopover, { signal: signal });
   submitBtn.addEventListener("click", submitBugFromPopover, { signal: signal });
@@ -926,6 +1090,18 @@
     drainEvents: function () {
       return session.drainEvents();
     },
+    peekEvents: function () {
+      return session.peekEvents();
+    },
+    ackEvents: function (ids) {
+      return session.ackEvents(ids);
+    },
+    getArchive: function (opts) {
+      return session.getArchive(opts);
+    },
+    exportSession: function () {
+      return session.exportSession();
+    },
     ack: function (a) {
       a = a || {};
       session.ack(a);
@@ -1004,10 +1180,82 @@
       },
       {
         name: "qa_drain_events",
-        description: "Return all pending QA events (bugs, notes, completions, help) and clear them.",
+        description:
+          "Destructive: return all pending QA events (bugs, notes, completions, help) and clear the pending queue. Data is NOT lost if this is dropped/truncated — every event is also in the durable archive (qa_get_archive). For guaranteed delivery prefer qa_peek_events + qa_ack_events.",
         inputSchema: { type: "object", properties: {} },
         handler: function () {
           return bridge.drainEvents();
+        }
+      },
+      {
+        name: "qa_peek_events",
+        description:
+          "Non-destructive: return pending QA events without clearing them. Pair with qa_ack_events once you have durably persisted them (at-least-once delivery).",
+        inputSchema: { type: "object", properties: {} },
+        handler: function () {
+          return bridge.peekEvents();
+        }
+      },
+      {
+        name: "qa_ack_events",
+        description:
+          "Cursor removal: drop only the events whose id is in eventIds from the pending queue. The durable archive is untouched. Call this AFTER persisting the events returned by qa_peek_events.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            eventIds: { type: "array", items: { type: "string" } }
+          },
+          required: ["eventIds"]
+        },
+        handler: function (args) {
+          return bridge.ackEvents(args ? args.eventIds : []);
+        }
+      },
+      {
+        name: "qa_get_archive",
+        description:
+          "Return the durable, append-only record of every event this session captured (nothing is ever removed). Optional sinceSeq returns only events with a higher sequence number, for paging forward. Use this to recover from a truncated drain or a lost poll.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            sinceSeq: { type: "number", description: "Return only events with seq greater than this." }
+          }
+        },
+        handler: function (args) {
+          return bridge.getArchive(args && typeof args.sinceSeq === "number" ? { sinceSeq: args.sinceSeq } : undefined);
+        }
+      },
+      {
+        name: "qa_export_session",
+        description:
+          "Return a single self-contained dump of the whole session (quest, progress, counters, and the full durable archive). Save this to disk as the recovery + handoff artifact; with it, no session-end data loss is possible.",
+        inputSchema: { type: "object", properties: {} },
+        handler: function () {
+          return bridge.exportSession();
+        }
+      },
+      {
+        name: "qa_note",
+        description: "Record a free-form note event from the operator or agent into the session stream.",
+        inputSchema: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"]
+        },
+        handler: function (args) {
+          return bridge.note(args ? args.text : "");
+        }
+      },
+      {
+        name: "qa_request_help",
+        description: "Emit a help event: the operator is stuck or needs the agent to set up state.",
+        inputSchema: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"]
+        },
+        handler: function (args) {
+          return bridge.requestHelp(args ? args.text : "");
         }
       },
       {

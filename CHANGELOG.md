@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *Origins: QA Quest was extracted on 2026-07-08/09 from a production implementation developed privately. The public history intentionally starts at 0.1.0; earlier iterations lived in a private codebase and are not replayed here.*
 
+## [0.4.0] - 2026-07-09
+
+### Added
+
+- **Delivery guarantee (at-least-once).** Every event is appended to a new durable, append-only `qaquest:archive` key the instant it is created; nothing ever removes an entry (only a 2000-event cap trims the oldest). `drainEvents()` can still clear the pending queue, but data loss on a truncated/dropped drain or a session that ends without persisting is now impossible while the tab lives. Closes the run-1055 class where 5 of 10 reported bugs were lost to a destructive, truncated drain.
+- **Peek/ack cursor.** `peekEvents()` (non-destructive) + `ackEvents(ids)` (remove only confirmed-received ids) give true at-least-once delivery — an event leaves the pending queue only after the agent confirms it.
+- **`getArchive({sinceSeq?})`** — read the durable record, optionally paging forward by monotonic `seq`. **`exportSession()`** — a single self-contained dump (quest + counters + full archive) for recovery/handoff.
+- **Monotonic `seq`** on every event (`qaquest:seq`) for stable ordering and cursoring.
+- **Loss-visible HUD.** A "🛡 Secured N" stat proves `securedBugs === bugCount`; on any divergence it turns red ("⚠ N/M"), so silent data loss becomes loud.
+- **Session export button** (⤓) in the HUD — downloads the session JSON (clipboard fallback), a portable artifact for QA pros / devs independent of any agent.
+- **Expanded WebMCP surface**: `qa_peek_events`, `qa_ack_events`, `qa_get_archive`, `qa_export_session`, `qa_note`, `qa_request_help` join the existing tools; richer descriptions steering agents to the durable path.
+- `docs/ROADMAP.md` — the living improvement backlog toward 1.0.0.
+
+### Changed
+
+- `getState()` now reports `securedEvents`, `securedBugs`, and `lastSeq`.
+- `qa_drain_events` description now flags it as destructive and points to the archive / peek-ack path.
+
 ## [0.3.0] - 2026-07-09
 
 ### Added

@@ -85,9 +85,12 @@ it consistently. Re-probe only after a reload or if calls start failing.
 
 ## Phase 1: Play
 
-Run the polling loop from `references/session-loop.md`: call
-`drainEvents()` roughly every 15 seconds. The drain is destructive, so
-persist every drained event immediately before acting on it. Stay silent
+Run the polling loop from `references/session-loop.md`: `peekEvents()`
+roughly every 15 seconds, persist the returned events, then
+`ackEvents([...ids])` to clear only what you have on disk (the durable
+at-least-once path — prefer it over the legacy destructive
+`drainEvents()`). Every event is also on an append-only archive, so
+`getArchive({sinceSeq})` recovers anything a poll ever drops. Stay silent
 in the terminal between events; talk to the operator through `ack` toasts.
 
 Handle each event by type:
@@ -109,26 +112,34 @@ Handle each event by type:
 
 **Reload recovery:** if a poll fails, re-probe the bridge. On a hard
 reload the HUD is gone; re-inject the HUD file (same path resolution as
-Phase 0 step 4, idempotent) and continue. Quest state and pending events survive reloads in
-sessionStorage. A CLOSED tab is different: sessionStorage is per-tab, so
-undrained events in a closed tab are gone. Tell the operator exactly what
-was lost and re-load the quest in the new tab.
+Phase 0 step 4, idempotent) and continue. Quest state, the pending queue,
+AND the append-only archive all survive reloads in sessionStorage — after
+re-injecting, `getArchive()` still holds every event ever reported. A
+CLOSED tab is different: sessionStorage is per-tab, so anything not yet
+saved off-tab dies with it. Mitigate by calling `exportSession()` at
+every milestone (not just at wrap) and saving the dump to disk — a
+checkpoint the operator can hand to a fresh tab. Tell the operator what,
+if anything, post-dates the last checkpoint, and re-load the quest in the
+new tab. (Cross-tab durability is roadmap 1.5.)
 
 ## Phase 2: Wrap
 
-1. **Final ack**: send a stats toast (score, objectives done, bugs found
+1. **Checkpoint the session**: call `exportSession()` and save the dump
+   (quest + counters + full archive) to your session notes. This is the
+   authoritative record; with it, nothing is lost even if the tab closes.
+2. **Final ack**: send a stats toast (score, objectives done, bugs found
    by severity) so the session ends on the HUD.
-2. **Terminal summary**: quest results, every bug with its status
+3. **Terminal summary**: quest results, every bug with its status
    (logged / dispatched / pr_open / wontfix), open fix PRs, anything
    dropped.
-3. **File remaining bugs** in the team's issue tracker, one issue per
+4. **File remaining bugs** in the team's issue tracker, one issue per
    bug card that has no PR. `DECIDE:` tracker and format from the host
    project's conventions.
-4. **Compile tests**: run the quest-to-test compiler
+5. **Compile tests**: run the quest-to-test compiler
    (`references/quest-to-tests.md`) on objectives that passed. Compiled
    specs are proposals; open them as a PR through the team's normal
    review flow. Never merge.
-5. **Offer, never run, the release step.** If the team has a release
+6. **Offer, never run, the release step.** If the team has a release
    command or checklist, mention it. Do not execute it unprompted.
 
 ## References

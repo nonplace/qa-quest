@@ -5,17 +5,25 @@ stay quiet, and how not to lose events.
 
 ## Cadence discipline
 
-- Call `drainEvents()` roughly every **15 seconds** while the session is
-  live. Faster wastes calls; slower breaks the "every action gets an ack
-  within ~15 seconds" promise.
-- **No narration between events.** An empty drain produces zero output
+- Poll roughly every **15 seconds** while the session is live. Faster
+  wastes calls; slower breaks the "every action gets an ack within ~15
+  seconds" promise.
+- **No narration between events.** An empty poll produces zero output
   from you. The operator is in flow; the HUD is the feedback surface.
   Terminal chatter during play is a bug in YOUR behaviour.
-- **The drain is destructive.** `drainEvents()` returns pending events
-  AND clears them from the bridge. The instant a drain returns a
-  non-empty array, persist it (append the raw JSON to your session log
-  or scratch file) BEFORE acting on any event. If you crash mid-handling,
-  the persisted copy is the only record.
+- **Use the durable peek/ack path, not destructive drain.** Call
+  `peekEvents()` (non-destructive), persist the returned events to your
+  session log / scratch file, then `ackEvents([...ids])` to remove ONLY
+  the ones you have on disk. An event leaves the pending queue only after
+  it is durably yours, so a crash between peek and ack simply re-delivers.
+- **Durability is guaranteed regardless.** Every event is also appended
+  to an append-only archive that nothing ever removes. If you ever call
+  the legacy destructive `drainEvents()` and its inline return is
+  truncated or dropped, recover the full record with
+  `getArchive({sinceSeq})`. `exportSession()` returns the whole session
+  as one artifact — call it at wrap (and any time you want a checkpoint).
+  This is the fix for the run-1055 loss (5 of 10 bugs gone to a truncated
+  destructive drain); "reported" now means "secured on the archive."
 - Handle events in order. Acks first (they are cheap and keep the
   operator moving), heavier work (context capture, subagent dispatch)
   after.
@@ -35,7 +43,21 @@ JSON.stringify(window.__qaQuest.getState())
 // Load a quest (object or JSON string both accepted)
 JSON.stringify(window.__qaQuest.loadQuest({"id":"smoke-2026-07-09","title":"Acme Shop Smoke Run","createdAt":"2026-07-09T09:00:00.000Z","objectives":[{"id":"home-loads","title":"Open the home page","who":"human","points":100,"done":false}]}))
 
-// Poll: drain pending events (DESTRUCTIVE, persist the result immediately)
+// Poll (PREFERRED, non-destructive): read pending events without clearing
+JSON.stringify(window.__qaQuest.peekEvents())
+
+// Ack: remove ONLY the events you have persisted from the pending queue
+JSON.stringify(window.__qaQuest.ackEvents(["<id1>", "<id2>"]))
+
+// Recover / audit: the append-only archive (nothing is ever removed)
+JSON.stringify(window.__qaQuest.getArchive())            // full record
+JSON.stringify(window.__qaQuest.getArchive({ sinceSeq: 7 }))  // page forward
+
+// Checkpoint / wrap: one self-contained dump (quest + counters + archive)
+JSON.stringify(window.__qaQuest.exportSession())
+
+// Legacy poll (DESTRUCTIVE): clears the pending queue. Data is still safe in
+// the archive, but prefer peek+ack. Persist the result immediately if used.
 JSON.stringify(window.__qaQuest.drainEvents())
 
 // Mark an agent objective done (idempotent)
