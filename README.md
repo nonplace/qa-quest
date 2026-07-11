@@ -47,7 +47,8 @@ When the level is done, the agent posts final stats, files the remaining bugs in
 ## Features
 
 - **Gamified co-op loop.** Quest levels generated from your actual release content, severity-based bug bounties, score, progress bar, acknowledgement toasts. The emotional design is load-bearing: QA should feel like a hunt.
-- **Injectable zero-dependency HUD.** One self-contained plain-JS file (`assets/qa-quest-hud.js`), injected into the target tab by the agent at session start. No app changes, no build step. Idempotent on reload; state survives in sessionStorage.
+- **Injectable zero-dependency HUD.** One self-contained plain-JS file (`assets/qa-quest-hud.js`), injected into the target tab by the agent at session start. No app changes, no build step. Idempotent on reload; draggable and collapsible so it never has to sit on top of the thing you're testing.
+- **Bugs survive a closed tab.** Reported bugs are appended to a durable, append-only log in `localStorage` the instant they're captured, separate from the live event queue the agent polls. Even a lost poll, a truncated read, or closing the quest tab entirely can't lose a reported bug; `getBugs()` (or its WebMCP twin `qa_get_bugs`) reads the durable record from any tab on the origin.
 - **WebMCP-native, with a shim.** The bridge is exposed both as `window.__qaQuest` (works everywhere a browser tool can evaluate JS) and as WebMCP tools via `document.modelContext` (Chrome 149+ origin trial, feature-detected, silent no-op when absent).
 - **Quest-to-regression-test compiler.** Every objective you validated by hand becomes a deterministic test skeleton (Playwright by default). The act steps replay your real interaction; setup and assert may use your app's own APIs.
 - **Semantic test seam guidance.** Docs for app teams on exposing read-only state probes as WebMCP tools next to QA Quest's, so compiled tests assert against app semantics instead of brittle selectors.
@@ -65,7 +66,7 @@ When the level is done, the agent posts final stats, files the remaining bugs in
 |  |  - HUD (quest, score)    |  |                |                                  |
 |  |  - window.__qaQuest      |  |   poll ~15s    |  Phase 1: drainEvents() loop     |
 |  |  - WebMCP tools (qa_*)   |<-+---JS eval or---+   bug -> ack -> capture context  |
-|  |  - sessionStorage state  |  |   WebMCP       |   -> bug card -> fix subagent    |
+|  |  - session + durable state|  |   WebMCP      |   -> bug card -> fix subagent    |
 |  +--------------------------+  |                |      (isolated branch, no merge) |
 |                                |   ack toasts   |                                  |
 |  Operator owns the mouse.      |<---------------+  Phase 2: stats, file bugs,      |
@@ -97,7 +98,7 @@ To check whether WebMCP is active, open DevTools on the page after the HUD appea
 (await document.modelContext.getTools()).map(t => t.name)
 ```
 
-You should see six names starting with `qa_`. If this errors instead, nothing is broken; the session just uses the direct channel, with identical behaviour.
+You should see 14 names starting with `qa_`. If this errors instead, nothing is broken; the session just uses the direct channel, with identical behaviour.
 
 ## Works with other agents
 

@@ -5,17 +5,28 @@ stay quiet, and how not to lose events.
 
 ## Cadence discipline
 
-- Call `drainEvents()` roughly every **15 seconds** while the session is
-  live. Faster wastes calls; slower breaks the "every action gets an ack
-  within ~15 seconds" promise.
-- **No narration between events.** An empty drain produces zero output
+- Poll roughly every **15 seconds** while the session is live. Faster
+  wastes calls; slower breaks the "every action gets an ack within ~15
+  seconds" promise.
+- **No narration between events.** An empty poll produces zero output
   from you. The operator is in flow; the HUD is the feedback surface.
   Terminal chatter during play is a bug in YOUR behaviour.
-- **The drain is destructive.** `drainEvents()` returns pending events
-  AND clears them from the bridge. The instant a drain returns a
-  non-empty array, persist it (append the raw JSON to your session log
-  or scratch file) BEFORE acting on any event. If you crash mid-handling,
-  the persisted copy is the only record.
+- **Use the durable peek/ack path, not destructive drain.** Call
+  `peekEvents()` (non-destructive), persist the returned events to your
+  session log / scratch file, then `ackEvents([...ids])` to remove ONLY
+  the ones you have on disk. An event leaves the pending queue only after
+  it is durably yours, so a crash between peek and ack simply re-delivers.
+- **Durability is guaranteed regardless.** Every event is also appended
+  to an append-only archive that nothing ever removes, stored in
+  `localStorage` so it survives a closed tab too, not just a reload. If
+  you ever call the legacy destructive `drainEvents()` and its inline
+  return is truncated or dropped, recover with `getBugs({sinceSeq})` for
+  bugs specifically or `getArchive({sinceSeq})` for the full record.
+  `exportSession()` returns the whole session as one artifact — call it
+  at wrap (and any time you want a checkpoint). This is the fix for the
+  run-1055 loss (5 of 10 bugs gone to a truncated destructive drain);
+  "reported" now means "secured on the archive," and secured now survives
+  the tab closing.
 - Handle events in order. Acks first (they are cheap and keep the
   operator moving), heavier work (context capture, subagent dispatch)
   after.
@@ -35,7 +46,26 @@ JSON.stringify(window.__qaQuest.getState())
 // Load a quest (object or JSON string both accepted)
 JSON.stringify(window.__qaQuest.loadQuest({"id":"smoke-2026-07-09","title":"Acme Shop Smoke Run","createdAt":"2026-07-09T09:00:00.000Z","objectives":[{"id":"home-loads","title":"Open the home page","who":"human","points":100,"done":false}]}))
 
-// Poll: drain pending events (DESTRUCTIVE, persist the result immediately)
+// Poll (PREFERRED, non-destructive): read pending events without clearing
+JSON.stringify(window.__qaQuest.peekEvents())
+
+// Ack: remove ONLY the events you have persisted from the pending queue
+JSON.stringify(window.__qaQuest.ackEvents(["<id1>", "<id2>"]))
+
+// Recover / audit: the append-only archive (nothing is ever removed,
+// and it survives a closed tab — see "Tab hygiene" below)
+JSON.stringify(window.__qaQuest.getBugs())                // bug reports only (prefer this)
+JSON.stringify(window.__qaQuest.getArchive())             // full record (all event types)
+JSON.stringify(window.__qaQuest.getArchive({ sinceSeq: 7 }))  // page forward
+
+// Explicit reset of the durable log for a fresh run (quest/score untouched)
+JSON.stringify(window.__qaQuest.clearBugs())
+
+// Checkpoint / wrap: one self-contained dump (quest + counters + archive)
+JSON.stringify(window.__qaQuest.exportSession())
+
+// Legacy poll (DESTRUCTIVE): clears the pending queue. Data is still safe in
+// the archive, but prefer peek+ack. Persist the result immediately if used.
 JSON.stringify(window.__qaQuest.drainEvents())
 
 // Mark an agent objective done (idempotent)
@@ -86,20 +116,31 @@ short, emoji-prefixed, and specific.
 
 ## Tab hygiene
 
-State (quest, pending events, counters) lives in **sessionStorage**,
-which is **per-tab**. Consequences:
+Quest state, the pending event queue, and score counters live in
+**sessionStorage**, which is **per-tab**. The append-only archive (and
+`getBugs()`/`getArchive()` on top of it) lives in **localStorage**, which
+survives a closed tab. Consequences:
 
-- **Reload (same tab): safe.** State survives. The HUD script itself is
-  gone after a hard reload, so re-inject `assets/qa-quest-hud.js`
-  (idempotent, no-op refresh) when a probe fails, then keep polling.
-- **Closed tab: undrained events are lost.** If the operator closes the
-  quest tab, everything not yet drained is unrecoverable. Say exactly
-  what was lost ("the tab closed with 2 pending events; anything you
-  reported in the last ~15 seconds needs re-reporting"), re-inject in
-  the new tab, and re-load the quest JSON from your session notes.
-- **New tab / second tab: a blank world.** A second tab has no quest and
-  no HUD until you inject and load there. Keep the session to one tab
-  unless the flow genuinely requires more; if it does, treat each tab as
-  its own bridge and poll both.
-- After any recovery, verify with `getState()` that the quest, progress,
-  and bug count match your session log before going quiet again.
+- **Reload (same tab): safe.** Everything survives, archive included. The
+  HUD script itself is gone after a hard reload, so re-inject
+  `assets/qa-quest-hud.js` (idempotent, no-op refresh) when a probe fails,
+  then keep polling.
+- **Closed tab: bugs are safe; quest/score/pending-queue are not.** If the
+  operator closes the quest tab, `getBugs()`/`getArchive()` in a fresh tab
+  on the same origin still return every bug ever reported — nothing is
+  lost there. What IS lost is anything session-scoped: the in-progress
+  quest, objective completion, score, and any pending event not yet
+  acked/drained. Re-inject in the new tab, call `getBugs()` and diff
+  against your session notes to confirm nothing needs re-filing, then
+  re-load the quest JSON and tell the operator what quest/score state (not
+  bug data) needs to be re-established.
+- **New tab / second tab: a blank quest, but a shared bug log.** A second
+  tab has no quest and no HUD state of its own until you inject and load
+  there, but `getBugs()` in that tab already sees every bug from the first
+  tab (same-origin `localStorage`). Keep the session to one tab unless the
+  flow genuinely requires more; if it does, treat each tab as its own
+  bridge for quest/poll purposes, but rely on the shared durable log for
+  the bug count, not each tab's own `bugCount`.
+- After any recovery, verify with `getState()` that the quest and progress
+  match your session log, and with `getBugs()` that the bug list matches,
+  before going quiet again.
