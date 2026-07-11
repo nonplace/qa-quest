@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *Origins: QA Quest was extracted on 2026-07-08/09 from a production implementation developed privately. The public history intentionally starts at 0.1.0; earlier iterations lived in a private codebase and are not replayed here.*
 
+## [0.5.0] - 2026-07-11
+
+### Added
+
+- **Closed-tab durability.** The append-only archive and its `seq` counter now live in `localStorage` (`durableStorage`, falls back to the passed-in storage if unavailable) instead of the per-tab `sessionStorage` that quest/pending-events/counters still use. 0.4.0 closed the truncated/lost-drain half of the run-1055 data-loss class; this closes the other half the roadmap flagged as open (1.5): closing the quest tab no longer loses reported bugs, because the durable log now survives it. Verified with a real Chrome smoke test (two tabs, same origin): bugs reported in tab A are readable from a fresh tab B via the shared `localStorage`, while session-scoped state (quest, bugCount) correctly does not cross tabs.
+- **`getBugs({sinceSeq?})`** — a non-destructive accessor returning the durable archive filtered to bug reports only. This is now the canonical "what bugs were found" read: unlike `drainEvents()`/`peekEvents()`, it can never lose data to a truncated inline return, because it never removes anything.
+- **`clearBugs()`** — explicit reset of the durable archive for starting a fresh run. Deliberately narrow: quest state and score counters (`bugCount`/`bugPoints`) are untouched, so clearing the log never silently changes the HUD's visible score.
+- **Draggable HUD.** The pill and the panel's head are now pointer-draggable (mouse and touch), so the fixed bottom-right HUD can be moved off content it would otherwise obstruct, e.g. under a simulated mobile viewport. A short move-threshold distinguishes a drag from a click, so the pill's expand/collapse toggle and the head's own buttons (export, collapse) are unaffected. Position is clamped to the viewport and reclamped on resize.
+- Two new WebMCP tools: `qa_get_bugs` ({sinceSeq?}), `qa_clear_bugs`.
+
+### Changed
+
+- `qa_drain_events`'s description now also points to `qa_get_bugs` for the bug-only durable read.
+
 ## [0.4.0] - 2026-07-09
 
 ### Added
@@ -57,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude Code plugin packaging (`.claude-plugin/plugin.json` + `marketplace.json`) so the repo installs via `/plugin marketplace add nonplace/qa-quest`.
 - CI workflow (Node 22: syntax check + node --test), MIT license, contributing guide, and architecture documentation.
 
+[0.5.0]: https://github.com/nonplace/qa-quest/releases/tag/v0.5.0
+[0.4.0]: https://github.com/nonplace/qa-quest/releases/tag/v0.4.0
 [0.3.0]: https://github.com/nonplace/qa-quest/releases/tag/v0.3.0
 [0.2.0]: https://github.com/nonplace/qa-quest/releases/tag/v0.2.0
 [0.1.0]: https://github.com/nonplace/qa-quest/releases/tag/v0.1.0

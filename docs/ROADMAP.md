@@ -19,9 +19,24 @@ checksum) were permanently lost. Status legend: 🔴 blocker for 1.0 · 🟠 sho
   export button, and six new WebMCP tools (`qa_peek_events`, `qa_ack_events`,
   `qa_get_archive`, `qa_export_session`, `qa_note`, `qa_request_help`).
 
-Remaining for 1.0: 1.3 (durable sink / immediate transfer), 1.5 (cross-tab),
-2.1 (HUD survives SPA), 2.2 (operator marks objectives — partially present as
-clickable rows), 3.x (push transport). Everything below is the forward view.
+### Shipped in 0.5.0 (2026-07-11) — closed-tab durability + HUD ergonomics
+
+- ✅ **1.5** durable storage split: the archive + `seq` now live in
+  `localStorage` (`durableStorage`), not the per-tab `sessionStorage` that
+  quest/pending-events/counters still use. A closed tab no longer loses
+  reported bugs — verified with a real two-tab Chrome smoke test.
+- ✅ `getBugs({sinceSeq?})` — non-destructive, bug-filtered read of the
+  durable archive; the new canonical "what bugs were found" accessor.
+- ✅ `clearBugs()` — explicit durable-log reset for a fresh run, without
+  touching quest state or score counters.
+- ✅ HUD is pointer-draggable (mouse + touch), so it can be moved off content
+  it would otherwise obstruct on narrow/mobile-simulated viewports. A
+  move-threshold keeps the pill's expand/collapse click and the head's own
+  buttons working unchanged.
+
+Remaining for 1.0: 1.3 (durable sink / immediate transfer), 2.1 (HUD survives
+SPA), 2.2 (operator marks objectives — partially present as clickable rows),
+3.x (push transport). Everything below is the forward view.
 
 ---
 
@@ -74,10 +89,16 @@ Surface `N reported / M delivered-to-agent / K archived` in the HUD so any
 divergence (the run-1055 `count=10, events=0`) is loud, not silent. A red
 "undelivered" badge when pending > 0 and no drain has happened recently.
 
-### 1.5 Cross-tab durability 🟢
-Mirror the archive to `localStorage` or a `BroadcastChannel` so a closed/lost
-tab is survivable and quests are resumable in a new tab. Guard against
-multi-tab double-counting.
+### 1.5 Cross-tab durability ✅ shipped in 0.5.0
+The archive + `seq` now live in `localStorage` instead of `sessionStorage`, so
+a closed/lost tab no longer loses reported bugs; `getBugs()`/`getArchive()`
+read the same durable record from any tab on the origin. Quest state, the
+pending queue, and score counters remain per-tab by design (sessionStorage),
+matching the "one QA session = one tab" model — a second tab sees the durable
+bug log but starts its own quest/score, so there is no multi-tab
+double-counting to guard against. A `BroadcastChannel`-based live sync of
+quest/progress across tabs is still open if a genuine multi-tab session
+becomes a real use case.
 
 ---
 
@@ -98,15 +119,23 @@ the agent can call `completeObjective`. Add a one-tap "clear objective"
 affordance (checkbox per objective) so gameplay state tracks reality. Feeds the
 Phase 2 quest-to-tests compiler (only passed objectives compile).
 
-### 2.3 In-modal severity picker + richer capture 🟠
-Bug-report modal gets an explicit P1/P2/P3 picker (operator hint today is
-free-text) and auto-bundles the console ring + a screenshot handle + viewport
-+ route into the event payload, so the agent's capture step is confirmation,
-not reconstruction.
+### 2.3 In-modal severity picker + richer capture ✅ (picker shipped earlier; capture still open 🟢)
+The bug-report popover already has an explicit P1/P2/P3 chip picker (not
+free-text) and auto-bundles the console ring + viewport + route into the
+event payload. Still open: a screenshot handle in the same payload, so the
+agent's capture step is pure confirmation instead of a separate screenshot
+round-trip.
 
 ### 2.4 Objective-aware bug tagging 🟢
 When a bug is reported while an objective is "active," tag the event with that
 objective id so bugs cluster by quest zone in the wrap-up.
+
+### 2.5 Draggable / repositionable HUD ✅ shipped in 0.5.0
+The pill and panel head are pointer-draggable (mouse + touch) so the fixed
+bottom-right HUD can be moved off content it would otherwise obstruct on
+narrow or mobile-simulated viewports. A move-threshold distinguishes a drag
+from a click so existing click behaviour (expand/collapse, export, report)
+is unaffected.
 
 ---
 

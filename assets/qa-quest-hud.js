@@ -1,5 +1,5 @@
 /*!
- * qa-quest-hud v0.4.0
+ * qa-quest-hud v0.5.0
  * QA Quest in-page layer: agent bridge (window.__qaQuest), gamified HUD,
  * console ring buffer, and WebMCP tool registration. One file, plain JS,
  * zero dependencies, no build step. Inject into any page or vendor it
@@ -9,7 +9,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "0.4.0";
+  var VERSION = "0.5.0";
 
   // -------------------------------------------------------------------------
   // core: pure logic, no DOM. Exposed via module.exports for Node tests and
@@ -24,12 +24,21 @@
     // entry — only the bounded-cap trim in pushEvent drops the oldest. This
     // is the at-least-once backstop: "reported" == "secured", independent of
     // whether the agent's poll/drain ever succeeds. See docs/ROADMAP.md 1.1.
+    // Lives in `durableStorage` (localStorage in the browser layer below),
+    // NOT the per-tab `storage` (sessionStorage) that quest/events/counters
+    // use — that split is what survives a closed tab, not just a reload.
+    // See docs/ROADMAP.md 1.5.
     archive: "qaquest:archive",
-    // Monotonic sequence counter. Every event carries a stable `seq` so the
-    // agent can request "everything since seq N" without re-scanning.
+    // Monotonic sequence counter. Lives in `durableStorage` alongside the
+    // archive so seq numbers stay meaningful (and gap-free relative to the
+    // archive) across a closed-tab recovery.
     seq: "qaquest:seq",
     bugCount: "qaquest:bugCount",
-    bugPoints: "qaquest:bugPoints"
+    bugPoints: "qaquest:bugPoints",
+    // Cosmetic HUD drag position. Deliberately kept in the per-tab `storage`,
+    // not the durable archive store: losing a dragged position on tab close
+    // is a non-event (the HUD just reverts to its default corner).
+    hudPos: "qaquest:hudPos"
   };
 
   var BOUNTY = { P1: 300, P2: 150, P3: 50 };
@@ -209,6 +218,12 @@
   function createSession(opts) {
     opts = opts || {};
     var storage = opts.storage;
+    // Where the durable archive/seq live. Defaults to `storage` when the
+    // caller doesn't pass one (older callers, and every existing test, keep
+    // working unchanged with a single storage backend). The browser layer
+    // below passes `window.localStorage` here so the bug archive survives a
+    // closed tab, which sessionStorage cannot.
+    var durableStorage = opts.durableStorage || storage;
     var now =
       opts.now ||
       function () {
@@ -280,11 +295,12 @@
       return events;
     }
 
-    function readCount(key) {
-      var v = readJSON(storage, key, 0);
+    function readCount(key, storageRef) {
+      var ref = storageRef || storage;
+      var v = readJSON(ref, key, 0);
       if (typeof v !== "number" || !isFinite(v) || v < 0) {
         try {
-          storage.removeItem(key);
+          ref.removeItem(key);
         } catch (e) {
           /* ignore */
         }
@@ -294,10 +310,10 @@
     }
 
     function readArchive() {
-      var archive = readJSON(storage, KEYS.archive, []);
+      var archive = readJSON(durableStorage, KEYS.archive, []);
       if (!Array.isArray(archive)) {
         try {
-          storage.removeItem(KEYS.archive);
+          durableStorage.removeItem(KEYS.archive);
         } catch (e) {
           /* ignore */
         }
@@ -309,19 +325,19 @@
     function pushEvent(type, payload) {
       var event = {
         id: makeId(),
-        seq: readCount(KEYS.seq) + 1,
+        seq: readCount(KEYS.seq, durableStorage) + 1,
         type: type,
         ts: now(),
         route: getRoute(),
         payload: payload || {}
       };
-      writeJSON(storage, KEYS.seq, event.seq);
+      writeJSON(durableStorage, KEYS.seq, event.seq);
       // Durable archive FIRST: if anything below fails, the event is already
       // secured. The archive is append-only and bounded (oldest trimmed).
       var archive = readArchive();
       archive.push(event);
       if (archive.length > ARCHIVE_MAX) archive = archive.slice(archive.length - ARCHIVE_MAX);
-      writeJSON(storage, KEYS.archive, archive);
+      writeJSON(durableStorage, KEYS.archive, archive);
       // Pending queue: the poll surface the agent drains/acks. Losing this
       // (truncated drain, closed tab) can no longer lose data — the archive holds it.
       var events = readEvents();
@@ -357,7 +373,7 @@
           // any divergence is a data-loss bug the HUD surfaces loudly.
           securedEvents: archive.length,
           securedBugs: archivedBugs,
-          lastSeq: readCount(KEYS.seq),
+          lastSeq: readCount(KEYS.seq, durableStorage),
           bugCount: readCount(KEYS.bugCount),
           injectedAt: injectedAt,
           version: VERSION
@@ -464,6 +480,38 @@
         return out;
       },
 
+      // Non-destructive: the durable archive filtered to bug reports only.
+      // THIS is the canonical source of truth for "what bugs were found" —
+      // drainEvents()/peekEvents() are a live notification channel that can
+      // be lost (a truncated inline read, a crash between poll and persist),
+      // while getBugs() reads the append-only record instead, so a
+      // lost/truncated drain can never lose a bug. Same `sinceSeq` paging
+      // contract as getArchive(). Never mutates state.
+      getBugs: function (opts) {
+        var archive = readArchive();
+        var sinceSeq = opts && typeof opts.sinceSeq === "number" ? opts.sinceSeq : null;
+        var out = [];
+        for (var i = 0; i < archive.length; i++) {
+          var e = archive[i];
+          if (!e || e.type !== "bug") continue;
+          if (sinceSeq !== null && !(typeof e.seq === "number" && e.seq > sinceSeq)) continue;
+          out.push(e);
+        }
+        return out;
+      },
+
+      // Explicit reset of the durable archive, for starting a fresh run.
+      // Deliberately narrow: the archive interleaves every event type under
+      // one monotonic seq, so "clear bugs" clears the whole durable log, not
+      // a filtered subset (there is no way to remove just the bug entries
+      // without breaking seq-based paging for the rest). Quest state and
+      // score counters (bugCount/bugPoints) are untouched on purpose, so
+      // clearing the log never silently changes the HUD's visible score.
+      clearBugs: function () {
+        writeJSON(durableStorage, KEYS.archive, []);
+        return { ok: true };
+      },
+
       // A single self-contained dump of the whole session: quest, progress,
       // counters, and the full durable archive. This is the recovery + handoff
       // artifact — save it to disk and no session-end loss is possible.
@@ -564,7 +612,7 @@
   // All user-visible copy lives here for easy fork translation.
   var STRINGS = {
     hudTitleFallback: "QA Quest",
-    pillLabel: "QA Quest HUD. Click or press Ctrl+Q to expand.",
+    pillLabel: "QA Quest HUD. Click or press Ctrl+Q to expand. Drag to move.",
     collapse: "Collapse",
     noQuest: "No quest loaded yet. The agent will send one shortly.",
     scoreLabel: "Score",
@@ -656,8 +704,21 @@
     { signal: signal }
   );
 
+  // Durable storage for the bug/event archive: localStorage survives a
+  // closed tab (sessionStorage does not), which is the whole point of the
+  // archive — see docs/ROADMAP.md 1.5. Falls back to sessionStorage if
+  // localStorage throws on access (some browser privacy modes do), so the
+  // HUD keeps working, just without the closed-tab guarantee.
+  var durableStorage;
+  try {
+    durableStorage = window.localStorage;
+  } catch (e) {
+    durableStorage = window.sessionStorage;
+  }
+
   var session = createSession({
     storage: window.sessionStorage,
+    durableStorage: durableStorage,
     getRoute: function () {
       return location.pathname + location.search;
     },
@@ -681,8 +742,13 @@
     ".qq-root{position:fixed;bottom:16px;right:16px;z-index:" + Z + ";display:flex;flex-direction:column;align-items:flex-end;gap:10px;max-width:min(340px,calc(100vw - 32px));box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.45;color:#e8eaf0;text-align:left;}" +
     ".qq-root *,.qq-root *::before,.qq-root *::after{box-sizing:border-box;}" +
     ".qq-card{background:rgba(17,19,24,0.93);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.09);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,0.45);}" +
-    ".qq-pill{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(17,19,24,0.93);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);color:#e8eaf0;font:inherit;font-weight:600;letter-spacing:0.2px;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,0.4);white-space:nowrap;}" +
+    ".qq-pill{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(17,19,24,0.93);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);color:#e8eaf0;font:inherit;font-weight:600;letter-spacing:0.2px;cursor:grab;box-shadow:0 8px 24px rgba(0,0,0,0.4);white-space:nowrap;touch-action:none;}" +
     ".qq-pill:hover{border-color:rgba(245,166,35,0.65);}" +
+    ".qq-pill:active{cursor:grabbing;}" +
+    ".qq-head{cursor:move;touch-action:none;}" +
+    ".qq-head .qq-x{cursor:pointer;touch-action:auto;}" +
+    ".qq-root.qq-dragging{opacity:0.92;}" +
+    ".qq-dragging,.qq-dragging *{cursor:grabbing !important;}" +
     ".qq-panel{width:320px;max-width:100%;padding:14px 14px 12px;display:flex;flex-direction:column;gap:10px;}" +
     ".qq-head{display:flex;align-items:center;justify-content:space-between;gap:8px;}" +
     ".qq-title{font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}" +
@@ -750,6 +816,7 @@
 
   var panel = el("div", "qq-card qq-panel qq-hidden");
   var head = el("div", "qq-head");
+  head.title = "Drag to move";
   var titleEl = el("span", "qq-title", STRINGS.hudTitleFallback);
   var exportBtn = button("qq-x", "⤓");
   exportBtn.setAttribute("aria-label", STRINGS.exportTitle);
@@ -921,6 +988,109 @@
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Drag-to-reposition. The HUD is fixed bottom-right by default, which can
+  // pin it directly over the surface under test on narrow/mobile-simulated
+  // viewports. Pointer events unify mouse and touch; a short-move threshold
+  // distinguishes a drag from a click so the pill's expand/collapse toggle
+  // and the panel head's own buttons (export, collapse) keep working.
+  // ---------------------------------------------------------------------
+  var DRAG_THRESHOLD = 6;
+  var dragState = null;
+  var suppressNextClick = false;
+
+  function clampToViewport(left, top) {
+    var rect = root.getBoundingClientRect();
+    var maxLeft = Math.max(4, window.innerWidth - rect.width - 4);
+    var maxTop = Math.max(4, window.innerHeight - rect.height - 4);
+    return {
+      left: Math.min(Math.max(4, left), maxLeft),
+      top: Math.min(Math.max(4, top), maxTop)
+    };
+  }
+
+  function applyRootPosition(left, top) {
+    var pos = clampToViewport(left, top);
+    root.style.left = pos.left + "px";
+    root.style.top = pos.top + "px";
+    root.style.right = "auto";
+    root.style.bottom = "auto";
+    return pos;
+  }
+
+  function onDragPointerDown(e) {
+    // Only the primary button/touch point starts a drag; right-click and
+    // secondary touches are ignored. A pointerdown that lands on one of the
+    // head's own buttons (export/collapse) never starts a drag, so those
+    // keep their normal click behaviour.
+    if (typeof e.button === "number" && e.button !== 0) return;
+    if (e.target && typeof e.target.closest === "function" && e.target.closest("button.qq-x")) return;
+    var rect = root.getBoundingClientRect();
+    dragState = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: rect.left,
+      startTop: rect.top,
+      moved: false
+    };
+    root.classList.add("qq-dragging");
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch (err) {
+      /* pointer capture is best-effort; document listeners still track the drag */
+    }
+  }
+
+  function onDragPointerMove(e) {
+    if (!dragState || e.pointerId !== dragState.pointerId) return;
+    var dx = e.clientX - dragState.startX;
+    var dy = e.clientY - dragState.startY;
+    if (!dragState.moved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+    dragState.moved = true;
+    applyRootPosition(dragState.startLeft + dx, dragState.startTop + dy);
+  }
+
+  function onDragPointerUp(e) {
+    if (!dragState || e.pointerId !== dragState.pointerId) return;
+    root.classList.remove("qq-dragging");
+    if (dragState.moved) {
+      // A drag just ended: suppress the click the browser fires right after
+      // pointerup, so dragging the pill never also toggles the panel.
+      suppressNextClick = true;
+      writeJSON(window.sessionStorage, KEYS.hudPos, {
+        left: parseFloat(root.style.left) || 0,
+        top: parseFloat(root.style.top) || 0
+      });
+    }
+    dragState = null;
+  }
+
+  [pill, head].forEach(function (handle) {
+    handle.addEventListener("pointerdown", onDragPointerDown, { signal: signal });
+  });
+  document.addEventListener("pointermove", onDragPointerMove, { signal: signal });
+  document.addEventListener("pointerup", onDragPointerUp, { signal: signal });
+  document.addEventListener("pointercancel", onDragPointerUp, { signal: signal });
+  window.addEventListener(
+    "resize",
+    function () {
+      if (root.style.left && root.style.top) {
+        applyRootPosition(parseFloat(root.style.left), parseFloat(root.style.top));
+      }
+    },
+    { signal: signal }
+  );
+
+  // Restore a dragged position from earlier in this tab (position is
+  // cosmetic UI state; kept in sessionStorage, never the durable archive).
+  (function restoreSavedPosition() {
+    var saved = readJSON(window.sessionStorage, KEYS.hudPos, null);
+    if (saved && typeof saved.left === "number" && typeof saved.top === "number") {
+      applyRootPosition(saved.left, saved.top);
+    }
+  })();
+
   var expanded = false;
 
   function setExpanded(next) {
@@ -983,6 +1153,10 @@
   pill.addEventListener(
     "click",
     function () {
+      if (suppressNextClick) {
+        suppressNextClick = false;
+        return;
+      }
       setExpanded(!expanded);
     },
     { signal: signal }
@@ -1099,6 +1273,14 @@
     getArchive: function (opts) {
       return session.getArchive(opts);
     },
+    getBugs: function (opts) {
+      return session.getBugs(opts);
+    },
+    clearBugs: function () {
+      var result = session.clearBugs();
+      render();
+      return result;
+    },
     exportSession: function () {
       return session.exportSession();
     },
@@ -1181,7 +1363,7 @@
       {
         name: "qa_drain_events",
         description:
-          "Destructive: return all pending QA events (bugs, notes, completions, help) and clear the pending queue. Data is NOT lost if this is dropped/truncated — every event is also in the durable archive (qa_get_archive). For guaranteed delivery prefer qa_peek_events + qa_ack_events.",
+          "Destructive: return all pending QA events (bugs, notes, completions, help) and clear the pending queue. Data is NOT lost if this is dropped/truncated — every event is also in the durable archive (qa_get_archive, or qa_get_bugs for bug reports only). For guaranteed delivery prefer qa_peek_events + qa_ack_events.",
         inputSchema: { type: "object", properties: {} },
         handler: function () {
           return bridge.drainEvents();
@@ -1223,6 +1405,29 @@
         },
         handler: function (args) {
           return bridge.getArchive(args && typeof args.sinceSeq === "number" ? { sinceSeq: args.sinceSeq } : undefined);
+        }
+      },
+      {
+        name: "qa_get_bugs",
+        description:
+          "Non-destructive: return the durable, append-only record filtered to bug reports only (nothing is ever removed by this call). This is the canonical source of truth for bugs found this session — prefer it over qa_drain_events/qa_peek_events when you just need the bug list, since a lost or truncated drain can never lose a bug here. Optional sinceSeq pages forward.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            sinceSeq: { type: "number", description: "Return only bugs with seq greater than this." }
+          }
+        },
+        handler: function (args) {
+          return bridge.getBugs(args && typeof args.sinceSeq === "number" ? { sinceSeq: args.sinceSeq } : undefined);
+        }
+      },
+      {
+        name: "qa_clear_bugs",
+        description:
+          "Explicitly clear the durable event/bug archive to start a fresh run. Does NOT touch quest state or score counters (bugCount/bugPoints), so the HUD's visible score is unaffected.",
+        inputSchema: { type: "object", properties: {} },
+        handler: function () {
+          return bridge.clearBugs();
         }
       },
       {

@@ -89,9 +89,12 @@ Run the polling loop from `references/session-loop.md`: `peekEvents()`
 roughly every 15 seconds, persist the returned events, then
 `ackEvents([...ids])` to clear only what you have on disk (the durable
 at-least-once path — prefer it over the legacy destructive
-`drainEvents()`). Every event is also on an append-only archive, so
-`getArchive({sinceSeq})` recovers anything a poll ever drops. Stay silent
-in the terminal between events; talk to the operator through `ack` toasts.
+`drainEvents()`). Every event is also on an append-only archive that lives
+in `localStorage` (not sessionStorage), so it survives a closed tab, not
+just a reload; `getBugs({sinceSeq})` recovers bugs specifically, and
+`getArchive({sinceSeq})` recovers the full event record, from any tab on
+the origin. Stay silent in the terminal between events; talk to the
+operator through `ack` toasts.
 
 Handle each event by type:
 
@@ -113,14 +116,23 @@ Handle each event by type:
 **Reload recovery:** if a poll fails, re-probe the bridge. On a hard
 reload the HUD is gone; re-inject the HUD file (same path resolution as
 Phase 0 step 4, idempotent) and continue. Quest state, the pending queue,
-AND the append-only archive all survive reloads in sessionStorage — after
-re-injecting, `getArchive()` still holds every event ever reported. A
-CLOSED tab is different: sessionStorage is per-tab, so anything not yet
-saved off-tab dies with it. Mitigate by calling `exportSession()` at
-every milestone (not just at wrap) and saving the dump to disk — a
-checkpoint the operator can hand to a fresh tab. Tell the operator what,
-if anything, post-dates the last checkpoint, and re-load the quest in the
-new tab. (Cross-tab durability is roadmap 1.5.)
+and the append-only archive all survive reloads — after re-injecting,
+`getArchive()`/`getBugs()` still hold every event/bug ever reported.
+
+**A CLOSED tab is different, but only for bugs vs. everything else.** The
+archive (and therefore `getBugs()`/`getArchive()`) lives in `localStorage`,
+which survives a closed tab, so no reported bug is ever lost this way — a
+fresh tab on the same origin reads the same durable record. Quest state,
+the pending (undrained/unacked) queue, and score counters are still
+per-tab `sessionStorage`, so those genuinely reset on a closed tab: you
+will see `getBugs()` return everything the operator found, but `getQuest()`
+and `getState().bugCount` on a fresh tab start from zero. Mitigate by
+calling `exportSession()` at every milestone (not just at wrap) and saving
+the dump to disk anyway — a single checkpoint the operator can hand to a
+fresh tab that also restores the quest/progress, not just the bugs. Tell
+the operator what, if anything, post-dates the last checkpoint, re-load
+the quest in the new tab, and reconcile `getBugs()` against your notes so
+nothing gets double-filed.
 
 ## Phase 2: Wrap
 

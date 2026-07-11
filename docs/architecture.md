@@ -16,10 +16,12 @@ A single self-contained IIFE, plain JavaScript, no build step, no dependencies. 
 
 Key properties:
 
-- **Idempotent.** Re-injection after a reload is a no-op refresh. Session state (quest, pending events, bug count, points) lives in sessionStorage, so a hard reload loses nothing that was already persisted. A closed tab does lose undrained events, since sessionStorage is per-tab.
-- **Defensive.** Corrupted sessionStorage JSON resets that key instead of throwing. A throwing subscriber callback never breaks event capture.
+- **Idempotent.** Re-injection after a reload is a no-op refresh. Session state (quest, pending events, bug count, points) lives in `sessionStorage`, so a hard reload loses nothing that was already persisted.
+- **Two-tier storage.** Quest/pending-events/counters are per-tab (`sessionStorage`); the append-only event archive is durable (`localStorage`), so a closed quest tab still loses the pending queue and in-progress quest/score, but never loses a reported bug — `getBugs()`/`getArchive()` read the same durable record from any tab on the origin.
+- **Defensive.** Corrupted storage JSON resets that key instead of throwing. A throwing subscriber callback never breaks event capture.
 - **Self-cleaning.** `destroy()` removes the HUD, listeners, and WebMCP registrations via a shared AbortController.
 - **Scoped.** All styles are inline and namespaced (`qq-` class prefix); the HUD never captures keyboard focus outside its report popover.
+- **Repositionable.** The pill and the panel's head are pointer-draggable (mouse and touch), so the fixed bottom-right HUD can be moved off content it would otherwise cover, e.g. under a simulated mobile viewport.
 
 ### 2. The skill (`skills/qa-quest/`)
 
@@ -39,18 +41,29 @@ Registration is hardened against both sync throws and async rejections, since `r
 
 ## Bridge API contract: `window.__qaQuest`
 
-sessionStorage keys: `qaquest:quest`, `qaquest:events`, `qaquest:bugCount`, `qaquest:bugPoints`. All methods are synchronous unless noted.
+Two storage tiers, split by durability need:
+
+- **Per-tab** (`sessionStorage`): `qaquest:quest`, `qaquest:events` (the pending queue), `qaquest:bugCount`, `qaquest:bugPoints`, `qaquest:hudPos` (cosmetic drag position). Lost when the tab closes.
+- **Durable, cross-tab** (`localStorage`, falls back to the per-tab storage if unavailable): `qaquest:archive` (append-only, every event ever captured), `qaquest:seq` (monotonic sequence counter). Survives a closed tab; readable from a fresh tab on the same origin.
+
+All methods are synchronous unless noted.
 
 | Method | Signature | Behaviour |
 |---|---|---|
 | `loadQuest` | `(input: unknown) => { ok, error? }` | Accepts an object or JSON string. Lenient validation (extras ignored) but rejects on missing quest id/title, empty objectives, or any objective missing id/title. Persists and re-renders the HUD. |
 | `getQuest` | `() => Quest \| null` | Current quest, or null. |
-| `getState` | `() => state` | Route, quest, progress (total/done/percent/score/bugPoints), pending event count, bug count, injection timestamp, library version. |
-| `reportBug` | `({ severity, note }) => QaEvent` | Increments bug count, adds bounty points (P1=300, P2=150, P3=50; unknown severity clamps to P3), captures the console ring buffer (last 20 errors/warnings/uncaught errors/unhandled rejections, each stringified and capped at 500 chars) and viewport into the payload, pushes a `bug` event, toasts locally. |
+| `getState` | `() => state` | Route, quest, progress (total/done/percent/score/bugPoints), pending event count, bug count, `securedEvents`/`securedBugs` (durable-archive counts; a `securedBugs < bugCount` divergence means undelivered data still worth investigating), `lastSeq`, injection timestamp, library version. |
+| `reportBug` | `({ severity, note }) => QaEvent` | Increments bug count, adds bounty points (P1=300, P2=150, P3=50; unknown severity clamps to P3), captures the console ring buffer (last 20 errors/warnings/uncaught errors/unhandled rejections, each stringified and capped at 500 chars) and viewport into the payload, appends a `bug` event to BOTH the pending queue and the durable archive, toasts locally. |
 | `completeObjective` | `(id) => { ok, alreadyDone? }` | Idempotent: completing twice returns `{ ok: true, alreadyDone: true }` and does not emit a second event or re-score. |
 | `note` | `(text) => QaEvent` | Free-form operator note event. |
 | `requestHelp` | `(text) => QaEvent` | Asks the agent to do something (usually setup via app APIs). |
-| `drainEvents` | `() => QaEvent[]` | Returns pending events AND clears them. The agent's poll primitive. |
+| `drainEvents` | `() => QaEvent[]` | Destructive: returns pending events AND clears the pending queue. Data loss on a truncated/dropped call is no longer possible — every event is also in the durable archive (`getArchive`/`getBugs`). The legacy poll primitive; prefer `peekEvents`/`ackEvents`. |
+| `peekEvents` | `() => QaEvent[]` | Non-destructive read of the pending queue. Pair with `ackEvents` once persisted, for true at-least-once delivery. |
+| `ackEvents` | `(ids: string[]) => { ok, removed, remaining }` | Removes only the given ids from the pending queue. The durable archive is untouched. |
+| `getArchive` | `(opts?: { sinceSeq?: number }) => QaEvent[]` | Non-destructive: the full durable, append-only record (nothing is ever removed short of the 2000-event cap trimming the oldest). Optional `sinceSeq` pages forward. Recovers anything a drain ever dropped, and survives a closed tab. |
+| `getBugs` | `(opts?: { sinceSeq?: number }) => QaEvent[]` | Non-destructive: `getArchive` filtered to `type === "bug"`. The canonical "what bugs were found" read — prefer it over filtering `drainEvents`/`peekEvents` output, since it reads the durable, closed-tab-survivable record instead of the live queue. |
+| `clearBugs` | `() => { ok: true }` | Explicitly empties the durable archive (all event types — it's one interleaved, seq-ordered log) for a fresh run. Does NOT touch quest state or score counters, so the HUD's visible score is unaffected. |
+| `exportSession` | `() => SessionDump` | Self-contained dump: version, quest, progress, `bugCount`/`bugPoints`, `lastSeq`, and the full durable archive. The recovery/handoff artifact — save it and no session-end loss is possible regardless of tab state. |
 | `ack` | `({ message, bugEventId?, status? }) => void` | Agent-to-operator toast. Status is one of `logged`, `dispatched`, `pr_open`, `wontfix`. |
 | `subscribe` | `(fn) => unsubscribe` | In-page listener for `quest` / `event` / `ack`; powers the HUD. |
 | `destroy` | `() => void` | Removes HUD, listeners, and WebMCP registrations. |
@@ -92,6 +105,14 @@ Registered when the model-context API is present; each tool delegates 1:1 to the
 | `qa_get_state` | none | `getState()` |
 | `qa_load_quest` | `{ quest }` | `loadQuest(quest)` |
 | `qa_drain_events` | none | `drainEvents()` |
+| `qa_peek_events` | none | `peekEvents()` |
+| `qa_ack_events` | `{ eventIds }` | `ackEvents(eventIds)` |
+| `qa_get_archive` | `{ sinceSeq? }` | `getArchive(...)` |
+| `qa_get_bugs` | `{ sinceSeq? }` | `getBugs(...)` |
+| `qa_clear_bugs` | none | `clearBugs()` |
+| `qa_export_session` | none | `exportSession()` |
+| `qa_note` | `{ text }` | `note(text)` |
+| `qa_request_help` | `{ text }` | `requestHelp(text)` |
 | `qa_complete_objective` | `{ objectiveId }` | `completeObjective(objectiveId)` |
 | `qa_report_bug` | `{ severity, note }` | `reportBug({ severity, note })` |
 | `qa_ack` | `{ message, bugEventId?, status? }` | `ack(...)` |
@@ -105,7 +126,7 @@ Registered when the model-context API is present; each tool delegates 1:1 to the
 ## Design rationale, condensed
 
 - **Why injection instead of an SDK?** Adoption cost. A QA tool that requires an app change gets adopted never; a tool the agent injects into any tab gets adopted this afternoon. The vendored-behind-a-dev-flag path exists for teams that want it pinned.
-- **Why sessionStorage?** Per-tab isolation matches the session model (one QA session = one tab), survives reloads, and can't leak between origins. The cost, losing undrained events with a closed tab, is acknowledged and surfaced by the skill.
+- **Why split sessionStorage and localStorage?** Per-tab isolation for quest/pending-events/counters matches the session model (one QA session = one tab), survives reloads, and can't leak between origins. But the durable archive is the one thing that must outlive the tab, since it's the sole record of what was found — so it lives in `localStorage` instead, the only storage tier that survives a closed tab on the same origin. The cost of the per-tab tier, losing the in-progress quest/score/pending-queue with a closed tab, is acknowledged and surfaced by the skill; the cost that mattered most, losing reported bugs, is closed.
 - **Why polling instead of a socket?** The agent's browser tools speak JS evaluation; a ~15 second `drainEvents()` poll is simple, reliable across every tool surface, and fast enough for the acknowledgement budget.
 - **Why WebMCP AND a direct bridge?** WebMCP is the right long-term surface (typed tools, standard discovery) but is an origin-trial feature today. The direct `window.__qaQuest` path makes the whole system work on any browser tool that can evaluate JS, with the shim upgrading transparently where WebMCP exists.
 - **Why does the agent never click during play?** Two reasons. Trust: the operator must know the state they see is the state they produced. Signal: the whole value of manual QA is human judgment on real interaction; an agent driving the mouse turns it back into the automation that already exists.

@@ -53,7 +53,7 @@ function makeSession(storage = makeStorage(), extra = {}) {
 
 describe("module surface", () => {
   test("exports the core API and version", () => {
-    assert.equal(core.VERSION, "0.4.0");
+    assert.equal(core.VERSION, "0.5.0");
     assert.deepEqual(core.BOUNTY, { P1: 300, P2: 150, P3: 50 });
     assert.deepEqual(core.KEYS, {
       quest: "qaquest:quest",
@@ -61,7 +61,8 @@ describe("module surface", () => {
       archive: "qaquest:archive",
       seq: "qaquest:seq",
       bugCount: "qaquest:bugCount",
-      bugPoints: "qaquest:bugPoints"
+      bugPoints: "qaquest:bugPoints",
+      hudPos: "qaquest:hudPos"
     });
     for (const fn of ["parseQuest", "computeProgress", "createRing", "createSession", "normalizeSeverity", "bountyFor"]) {
       assert.equal(typeof core[fn], "function", `core.${fn} should be a function`);
@@ -274,7 +275,7 @@ describe("session: loadQuest / getQuest / getState", () => {
     session.loadQuest(validQuest());
     const state = session.getState();
     assert.equal(state.route, "/checkout?step=2");
-    assert.equal(state.version, "0.4.0");
+    assert.equal(state.version, "0.5.0");
     assert.equal(state.bugCount, 0);
     assert.equal(state.pendingEvents, 0);
     assert.equal(Number.isNaN(Date.parse(state.injectedAt)), false, "injectedAt is a parseable ISO date");
@@ -609,12 +610,127 @@ describe("session: delivery guarantee (archive + peek/ack)", () => {
     session.drainEvents();
 
     const dump = session.exportSession();
-    assert.equal(dump.version, "0.4.0");
+    assert.equal(dump.version, "0.5.0");
     assert.equal(dump.bugCount, 1);
     assert.equal(dump.bugPoints, 300);
     assert.equal(dump.lastSeq, 2);
     assert.ok(dump.quest && dump.quest.id === "q1");
     assert.equal(dump.archive.length, 2, "export carries the full archive despite the drain");
     assert.equal(Number.isNaN(Date.parse(dump.exportedAt)), false);
+  });
+});
+
+// getBugs()/clearBugs() and the durable-storage split. getBugs() is the
+// bug-only convenience view on top of the archive; the durable-storage split
+// (archive/seq in a separate `durableStorage` from quest/events/counters) is
+// what makes the archive survive a closed tab in the browser, where
+// `durableStorage` is window.localStorage and `storage` is
+// window.sessionStorage. Regression coverage for the "sessionStorage dies on
+// tab close" half of the durable-bug-persistence fix.
+describe("session: getBugs / clearBugs", () => {
+  test("getBugs returns only bug-type events, in order, with sinceSeq paging", () => {
+    const session = makeSession();
+    const b1 = session.reportBug({ severity: "P1", note: "one" });
+    session.note("a note");
+    const b2 = session.reportBug({ severity: "P2", note: "two" });
+    session.requestHelp("seed a paid order");
+    const b3 = session.reportBug({ severity: "P3", note: "three" });
+
+    const bugs = session.getBugs();
+    assert.deepEqual(
+      bugs.map((e) => e.id),
+      [b1.id, b2.id, b3.id],
+      "non-bug events (note, help) are excluded"
+    );
+    assert.deepEqual(
+      session.getBugs({ sinceSeq: b1.seq }).map((e) => e.id),
+      [b2.id, b3.id]
+    );
+  });
+
+  test("getBugs survives a truncated/lost drainEvents (never a second copy problem)", () => {
+    const session = makeSession();
+    session.reportBug({ severity: "P1", note: "one" });
+    session.reportBug({ severity: "P2", note: "two" });
+
+    // Simulate the agent's drain result being dropped/truncated after the
+    // read: the pending queue is already cleared by the time that happens.
+    session.drainEvents();
+
+    const bugs = session.getBugs();
+    assert.equal(bugs.length, 2, "both bugs are still recoverable via the durable log");
+    assert.deepEqual(
+      bugs.map((e) => e.payload.note),
+      ["one", "two"]
+    );
+  });
+
+  test("clearBugs empties the durable log but leaves quest state and score counters untouched", () => {
+    const session = makeSession();
+    session.loadQuest(validQuest());
+    session.reportBug({ severity: "P1", note: "one" });
+    session.completeObjective("o1");
+
+    const result = session.clearBugs();
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(session.getBugs(), []);
+    assert.deepEqual(session.getArchive(), []);
+
+    // Score/progress are a separate concern from the durable log by design.
+    const state = session.getState();
+    assert.equal(state.bugCount, 1, "bugCount is a counter, not derived from the archive");
+    assert.equal(state.progress.bugPoints, 300);
+    assert.equal(state.progress.done, 1, "quest completion is untouched by clearBugs");
+  });
+});
+
+describe("session: durable storage survives a closed tab (localStorage split)", () => {
+  test("a session with no durableStorage option falls back to the single storage (back-compat)", () => {
+    // No durableStorage passed: this is the shape every pre-existing caller
+    // and every test above uses. The fallback must keep that contract
+    // unchanged rather than silently losing the archive.
+    const storage = makeStorage();
+    const session = makeSession(storage);
+    session.reportBug({ severity: "P1", note: "one" });
+    assert.equal(session.getArchive().length, 1);
+    assert.equal(storage.map.has("qaquest:archive"), true, "archive lands in the single storage when no split is configured");
+  });
+
+  test("bugs recorded in tab A are readable from a fresh session in tab B via the shared durable store", () => {
+    // Model the browser wiring directly: `durableStorage` is a stand-in for
+    // window.localStorage (shared across tabs on the same origin);
+    // `storage` is a stand-in for window.sessionStorage (per-tab, wiped on
+    // close). Two independent `storage` instances simulate two tabs.
+    const durableStorage = makeStorage();
+    const tabAStorage = makeStorage();
+    const tabBStorage = makeStorage();
+
+    const tabA = makeSession(tabAStorage, { durableStorage });
+    tabA.loadQuest(validQuest());
+    tabA.reportBug({ severity: "P1", note: "checkout crashed" });
+    tabA.reportBug({ severity: "P2", note: "cart total off by one" });
+    // Tab A closes without ever draining — this is exactly the loss
+    // scenario the fix targets: sessionStorage (tabAStorage) is gone, but
+    // the bugs must still be recoverable.
+
+    const tabB = makeSession(tabBStorage, { durableStorage });
+    const bugsInTabB = tabB.getBugs();
+    assert.equal(bugsInTabB.length, 2, "both bugs survive the simulated tab close");
+    assert.deepEqual(
+      bugsInTabB.map((e) => e.payload.note),
+      ["checkout crashed", "cart total off by one"]
+    );
+
+    // Session-scoped state does NOT cross tabs (matches sessionStorage
+    // semantics): tab B has no quest and a zero bugCount of its own, even
+    // though the durable bug log it can read is non-empty.
+    assert.equal(tabB.getQuest(), null);
+    assert.equal(tabB.getState().bugCount, 0);
+
+    // seq keeps counting from where the durable store left it, so a bug
+    // reported in tab B never collides with tab A's seq numbers.
+    const b3 = tabB.reportBug({ severity: "P3", note: "reported from tab B" });
+    assert.equal(b3.seq, 3);
+    assert.equal(tabB.getBugs().length, 3);
   });
 });
