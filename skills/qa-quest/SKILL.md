@@ -1,6 +1,6 @@
 ---
 name: qa-quest
-description: Runs a gamified co-op QA session (a "QA quest") against a web app. The human operator plays the app in their own real Chrome (real fingerprint, real session, passes bot-protection that automated browsers cannot); the agent co-pilots. It generates a quest level from the release content, injects an in-page HUD, seeds state, polls for bug reports and objectives, dispatches fix subagents in the background, and compiles the validated session into regression tests. Use whenever the user says "qa quest", "QA session", "let's QA this release", "play the release", "co-op QA", asks to manually test a release together, or wants to hunt bugs in a staging build before shipping.
+description: Runs a gamified co-op QA session (a "QA quest") against a web app. The human operator plays the app in their own real Chrome (real fingerprint, real session, passes bot-protection that automated browsers cannot); the agent co-pilots. It generates a quest level from the release content, injects an in-page HUD, seeds state, polls for bug reports and objectives, auto-dispatches fix-or-plan subagents in the background and records each finding as an ai-ready tracker issue, and compiles the validated session into regression tests. Use whenever the user says "qa quest", "QA session", "let's QA this release", "play the release", "co-op QA", asks to manually test a release together, or wants to hunt bugs in a staging build before shipping.
 ---
 
 # QA Quest
@@ -14,6 +14,37 @@ acknowledgement toast fast. The operator is a hunter, not a janitor.
 
 Steps marked `DECIDE:` are judgment calls. Everything else, follow
 literally.
+
+## Preconditions
+
+Confirm these before starting. If one is missing, say so and either arrange
+it or degrade gracefully — do not fake your way past a missing precondition.
+
+- **A browser channel to the operator's real browser.** The operator plays
+  in their own Chrome (real fingerprint + session, which passes
+  bot-protection like Cloudflare Turnstile that automated browsers cannot).
+  On Claude Code that's the Claude-in-Chrome extension; a chrome-devtools
+  MCP is a fallback, with the stated caveat that bot-protected flows may
+  fail in an automated profile. Headless/automated browsers cannot log in
+  through Turnstile — the operator drives.
+- **A reachable target build.** A staging/preview/local URL running the code
+  under test. Prefer a build that mirrors what you'll ship (same
+  branch/flags), and KNOW which build it is — a stale build produces phantom
+  "bugs" already fixed on main.
+- **The QA bridge, or the ability to inject it.** Either the app embeds a
+  bridge (`window.__qaQuest`, or a host-app embed such as `window.__swaqa`)
+  or the HUD asset can be injected (Phase 0 step 4). Probe the ACTUAL
+  methods available — an embed may expose a reduced API (see "Bridge API
+  variance" below).
+- **A scratch/session directory** to persist the event log, bug cards, and
+  session export. The HUD is not your system of record; your files are.
+- **For auto-dispatch (the core loop):** a git repo with worktree support +
+  the host project's PR/review/CI conventions + a way to open PRs (e.g.
+  `gh`), and access to the project's issue tracker (e.g. Linear MCP: team,
+  current cycle, and an `ai-ready`-style label) so each finding lands as a
+  tracked, autonomously-executable issue.
+- **The operator present.** Co-op by design: they own the mouse and report
+  bugs; you never drive their tab during play.
 
 ## Hard rules (non-negotiable, apply in every phase)
 
@@ -41,6 +72,28 @@ All session traffic goes through the in-page bridge `window.__qaQuest`
 
 Semantics are identical. Probe once in Phase 0, pick the channel, and use
 it consistently. Re-probe only after a reload or if calls start failing.
+
+**Bridge API variance.** The canonical bridge is `window.__qaQuest` with the
+full API. But a host app may embed its own bridge under a different global
+(e.g. `window.__swaqa`) with a REDUCED surface — for instance only
+`drainEvents`/`ack` and no `peekEvents`/`ackEvents`/`getArchive`/
+`exportSession`/`getBugs`. Probe the actual object (`Object.keys(bridge)`)
+and adapt: if the durable `peekEvents`/`ackEvents` pair is absent, use
+`drainEvents()` and persist every drained event to your own session file
+IMMEDIATELY (a drain is destructive — once you hold it, the HUD may not).
+Do NOT trust the HUD to round-trip agent-side `reportBug` details; some
+embeds store them without your text/title. Your on-disk session log and the
+tracker issues are the system of record, never the HUD.
+
+**There is no push — polling is the only inbound for HUD events.** Nothing
+notifies you when the operator hits Ctrl+B; you must poll the bridge on a
+cadence. Match the target tab by URL (e.g. `preview.example.com`), never a
+cached tab id — ids change on reload/reopen/close. Cadence: ~60s while the
+operator is actively hunting (self-scheduled wake-ups typically floor around
+60s), stretched to a few-minute backstop when idle. Crucially, the operator
+often ALSO reports findings in chat, which reaches you instantly — treat
+chat as the fast path and the poll as the backstop, and handle a finding the
+same way whether it arrives via the HUD or via chat.
 
 ## Phase 0: Setup
 
@@ -98,14 +151,26 @@ operator through `ack` toasts.
 
 Handle each event by type:
 
-- **bug**: ack fast (first ack within 15 seconds of the event, emoji
-  conventions in `references/session-loop.md`). Then capture context:
-  screenshot, console output, relevant network requests. Write a bug card
-  (template in `references/bug-dispatch.md`). `DECIDE:` whether to
-  dispatch a fix subagent in the background, per
-  `references/bug-dispatch.md`, using an isolated worktree and the host
-  project's conventions. On dispatch, ack again with status
-  `"dispatched"`; when a PR opens, ack with `"pr_open"`.
+- **bug** — this is the core of the skill; auto-dispatch is the point.
+  Ack fast (first ack within ~15s; emoji conventions in
+  `references/session-loop.md`). Capture context: screenshot, console
+  output, relevant network requests. Write a bug card (template in
+  `references/bug-dispatch.md`). Then, **by default, put a subagent on it in
+  the background** — no permission needed:
+    - a **FIX** for a clear, isolated bug (worktree subagent → PR through the
+      host project's normal review gates), or
+    - an **IMPLEMENTATION PLAN** for a larger / feature / design finding
+      (planning or design-advisor subagent → a proposal the issue carries).
+  AND **record the finding as an `ai-ready` issue in the current cycle** of
+  the project's tracker (AI-handover format: context / fix direction /
+  acceptance criteria / codebase pointers), so it enters the autonomous
+  delivery loop or a later session even if the in-session subagent doesn't
+  finish. Set the issue "in progress" when your subagent owns it so the
+  autonomous loop doesn't double-dispatch. The operator stays the hunter and
+  does none of this. Ack again with `"dispatched"`, then `"pr_open"` when a
+  PR opens. The QA loop still NEVER merges — dispatched fixes go through the
+  normal gates.
+  `DECIDE:` only fix-vs-plan and how to scope — never *whether* to act.
 - **help**: the operator is stuck or needs state. Do the setup through
   the app's own APIs (never their tab), then ack what you did.
 - **objective_done**: update your session log. Ack briefly if the
