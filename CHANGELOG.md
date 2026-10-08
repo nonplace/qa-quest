@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *Origins: QA Quest was extracted on 2026-07-08/09 from a production implementation developed privately. The public history intentionally starts at 0.1.0; earlier iterations lived in a private codebase and are not replayed here.*
 
+## [Unreleased]
+
+### Changed
+
+- **Skill groom (skills/qa-quest 1.0.0).** `SKILL.md` is shorter and written for strong models; the full closed-tab detail lives only in `references/session-loop.md`. The hard rule on merging is stricter: the loop never merges or runs a release step on its own. Added `guided.md` (checklists and wrong turns for weaker models) and `evals/evals.json`; the skill's own changelog is `skills/qa-quest/CHANGELOG.md`.
+
 ## [0.5.0] - 2026-07-11
 
 ### Added
